@@ -164,6 +164,25 @@ def classify(title, description, keywords, default_category):
     return cats
 
 
+def is_personal_review(title, source_name=""):
+    """個人の感想・評価レビューかどうかを判定する（友達の意見で追加、2026-11-21）。
+
+    対象は映画.com等の利用者レビューで、タイトルに
+    「映画レビュー（感想・評価）」や「○○さんの映画レビュー」が入る物。
+    編集部の記事や興行収入などのニュースは対象にしない。
+    """
+    t = title or ""
+    if "映画レビュー" in t and "感想" in t:
+        return True
+    if "感想・評価" in t:
+        return True
+    if re.search(r"さん+の映画レビュー", t):
+        return True
+    if (source_name or "") == "映画.com" and "映画レビュー" in t:
+        return True
+    return False
+
+
 def fetch(url):
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
@@ -188,23 +207,28 @@ def write_html(items, now):
         except Exception:
             date_str = it["published"]
         badges = " ".join(
-            '<span class="badge badge-' + CAT_CLASS.get(c, "other") + '">'
-            + html.escape(c) + "</span>"
+            '<button type="button" class="badge badge-' + CAT_CLASS.get(c, "other")
+            + '" data-filter="' + CAT_CLASS.get(c, "other") + '">'
+            + html.escape(c) + "</button>"
             for c in it["categories"])
         desc = ('<p class="desc">' + html.escape(it["description"]) + "</p>"
                 if it["description"] else "")
         main_cat = CAT_CLASS.get(it["categories"][0], "other") if it["categories"] else "other"
+        cats_attr = " ".join(CAT_CLASS.get(c, "other") for c in it["categories"])
         rows.append(
-            '<article class="card card-' + main_cat + '">'
+            '<article class="card card-' + main_cat + '" data-cats="' + cats_attr + '">'
             + '<div class="meta"><span class="badges">' + badges + "</span>"
             + "<time>" + date_str + "</time></div>"
             + '<h2><a href="' + html.escape(it["url"], quote=True) + '">'
             + html.escape(it["title"]) + "</a></h2>" + desc
             + '<div class="src">出典：' + html.escape(it["source"]) + "</div>"
             + "</article>")
-    legend = " ".join(
-        '<span class="badge badge-' + CAT_CLASS[c] + '">' + c + "</span>"
-        for c in ["映画", "グッズ", "イベント", "ゲーム", "その他"])
+    legend = (
+        '<button type="button" class="badge badge-all is-active" data-filter="all">すべて</button> '
+        + " ".join(
+            '<button type="button" class="badge badge-' + CAT_CLASS[c]
+            + '" data-filter="' + CAT_CLASS[c] + '">' + c + "</button>"
+            for c in ["映画", "グッズ", "イベント", "ゲーム", "その他"]))
     page = """<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -306,6 +330,12 @@ h1 .accent { color: var(--accent); }
 .badge-event { color: var(--event); border-color: var(--event); background: rgba(167, 139, 250, 0.12); }
 .badge-game  { color: var(--game);  border-color: var(--game);  background: rgba(94, 168, 255, 0.12); }
 .badge-other { color: var(--other); border-color: var(--other); background: rgba(154, 153, 163, 0.10); }
+button.badge { cursor: pointer; font-family: inherit; }
+button.badge:hover { filter: brightness(1.35); }
+button.badge.is-active { background: var(--text); color: #111116; border-color: var(--text); }
+.badge-all { color: var(--text); border-color: var(--text); background: rgba(244, 243, 239, 0.10); }
+.filter-status { margin: 12px 0 0; color: var(--muted); font-size: 0.85rem; }
+.card.is-hidden { display: none; }
 .card {
   background: linear-gradient(180deg, #181820, #121218);
   border: 1px solid var(--border);
@@ -350,12 +380,40 @@ footer { margin-top: 40px; color: var(--muted); font-size: 0.78rem; text-align: 
 <div class="rule"></div>
 <div class="headmeta"><span>最終更新：UPDATED</span><span class="count">全 COUNT 件</span></div>
 <div class="legend">LEGEND</div>
+<p class="filter-status" id="filterStatus">タグを押すと、その種類だけに絞り込めます。もう一度「すべて」を押すと戻ります。</p>
 </header>
 <main>
 ROWS
 </main>
 <footer>このページはプログラムが自動で作成しています。</footer>
 </div>
+<script>
+(function () {
+  var buttons = document.querySelectorAll("[data-filter]");
+  var cards = document.querySelectorAll(".card[data-cats]");
+  var status = document.getElementById("filterStatus");
+  var total = cards.length;
+  function apply(name) {
+    var shown = 0;
+    cards.forEach(function (card) {
+      var hit = name === "all" || (card.getAttribute("data-cats") || "").split(" ").indexOf(name) !== -1;
+      card.classList.toggle("is-hidden", !hit);
+      if (hit) shown += 1;
+    });
+    buttons.forEach(function (b) {
+      b.classList.toggle("is-active", b.getAttribute("data-filter") === name);
+    });
+    if (status) {
+      status.textContent = name === "all"
+        ? "全 " + total + " 件を表示しています。タグを押すと絞り込めます。"
+        : shown + " 件を表示しています。「すべて」を押すと戻ります。";
+    }
+  }
+  buttons.forEach(function (b) {
+    b.addEventListener("click", function () { apply(b.getAttribute("data-filter")); });
+  });
+})();
+</script>
 </body>
 </html>
 """
@@ -380,6 +438,12 @@ def main():
         except Exception as e:
             log(lines, f"警告: 既存 news.json が読めないため空から開始する: {e}")
             existing = []
+    before_purge = len(existing)
+    existing = [it for it in existing
+                if not is_personal_review(it.get("title", ""), it.get("source", ""))]
+    purged = before_purge - len(existing)
+    if purged:
+        log(lines, f"既存データから個人レビューを除去: {purged}件")
     seen_urls = {normalize_url(it["url"]) for it in existing}
     seen_titles = {normalize_title(it["title"]) for it in existing}
 
@@ -400,6 +464,8 @@ def main():
             continue
         kept = 0
         for it in items:
+            if is_personal_review(it["title"], it.get("feed_source_name") or name):
+                continue
             req_kw = src.get("require_keyword")
             if req_kw and req_kw not in it["title"] and req_kw not in it["description"]:
                 continue
